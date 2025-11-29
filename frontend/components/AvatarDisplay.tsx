@@ -103,8 +103,9 @@ function VRMAvatar({
     <group ref={groupRef}>
       <primitive 
         object={vrm.scene} 
-        scale={1.5}
-        position={[0, -1, 0]}
+        scale={3.5}
+        position={[0, -3.8, 0]}
+        rotation={[0, Math.PI, 0]}
       />
     </group>
   );
@@ -150,27 +151,33 @@ export default function AvatarDisplay({ isActive, status, onStart, onStop }: Ava
 
   return (
     <div className="flex flex-col items-center justify-center h-full px-4 md:px-8 lg:px-12">
-      {/* Avatar Container */}
+      {/* Avatar Container - Square for face portrait */}
       <motion.div
-        className="relative w-full max-w-lg aspect-video bg-gradient-to-br from-white to-gray-100 rounded-3xl overflow-hidden shadow-2xl"
+        className="relative w-full max-w-lg aspect-square bg-gradient-to-br from-white to-gray-100 rounded-3xl overflow-hidden shadow-2xl"
         initial={{ scale: 0.9, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ duration: 0.5 }}
       >
         {/* 3D VRM Avatar Canvas */}
         <Canvas
-          camera={{ position: [0, 0.5, 5], fov: 50 }}
+          camera={{ 
+            position: [0, 0.8, 1.8],
+            fov: 30,
+            near: 0.1,
+            far: 1000
+          }}
           style={{ 
             background: 'linear-gradient(to bottom right, #ffffff, #f3f4f6)',
             width: '100%',
             height: '100%'
           }}
         >
-          {/* Lighting */}
-          <ambientLight intensity={0.6} />
-          <directionalLight position={[5, 5, 5]} intensity={1} />
-          <directionalLight position={[-5, 3, -5]} intensity={0.4} />
-          <pointLight position={[0, 2, 0]} intensity={0.3} />
+          {/* Lighting - Enhanced for face visibility */}
+          <ambientLight intensity={0.9} />
+          <directionalLight position={[1, 2, 2]} intensity={1.5} />
+          <directionalLight position={[-1, 2, 2]} intensity={1} />
+          <pointLight position={[0, 1.5, 1.5]} intensity={0.6} />
+          <spotLight position={[0, 3, 1]} intensity={0.4} angle={0.3} penumbra={1} />
           
           {/* VRM Avatar */}
           <Suspense fallback={null}>
@@ -180,17 +187,19 @@ export default function AvatarDisplay({ isActive, status, onStart, onStop }: Ava
             />
           </Suspense>
           
-          {/* Camera Controls */}
+          {/* Camera Controls - Very restricted for portrait mode */}
           <OrbitControls 
             enableZoom={true}
-            minDistance={3}
-            maxDistance={7}
+            minDistance={1.5}
+            maxDistance={2.5}
             enablePan={false}
-            minPolarAngle={Math.PI / 3}
-            maxPolarAngle={Math.PI / 1.8}
-            target={[0, 0.5, 0]}
+            minPolarAngle={Math.PI / 2.2}
+            maxPolarAngle={Math.PI / 1.9}
+            target={[0, 0.8, 0]}
             enableDamping
             dampingFactor={0.05}
+            maxAzimuthAngle={Math.PI / 8}
+            minAzimuthAngle={-Math.PI / 8}
           />
         </Canvas>
 

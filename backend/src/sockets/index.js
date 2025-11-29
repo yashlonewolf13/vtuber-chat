@@ -2,9 +2,11 @@ import { Server } from 'socket.io';
 import { logger } from '../utils/logger.js';
 import { handleConversation } from '../controllers/conversation.controller.js';
 import { generateVoice } from '../services/elevenlabs.service.js';
+import heygenService from '../services/heygen.service.js';
 
 /**
  * Initialize Socket.IO with connection handlers
+ * Integrated with HeyGen for avatar streaming
  */
 export const initializeSocket = (httpServer) => {
   const io = new Server(httpServer, {
@@ -17,6 +19,9 @@ export const initializeSocket = (httpServer) => {
     pingInterval: 25000
   });
 
+  // Store HeyGen sessions
+  const heygenSessions = new Map();
+
   // Connection event
   io.on('connection', (socket) => {
     logger.info(`Client connected: ${socket.id}`);
@@ -25,8 +30,108 @@ export const initializeSocket = (httpServer) => {
     socket.data = {
       conversationMode: 'text', // default mode
       conversationHistory: [],
-      userId: null
+      userId: null,
+      heygenSessionId: null,
+      isAvatarActive: false
     };
+
+    // ============================================
+    // HEYGEN AVATAR SESSION MANAGEMENT
+    // ============================================
+
+    /**
+     * Start HeyGen avatar session
+     */
+    socket.on('start-avatar', async () => {
+      try {
+        logger.info(`Starting HeyGen avatar for client: ${socket.id}`);
+
+        // Create HeyGen streaming session
+        const sessionData = await heygenService.createStreamingSession();
+        
+        // Store session data
+        heygenSessions.set(socket.id, {
+          sessionId: sessionData.session_id,
+          accessToken: sessionData.access_token,
+          isActive: false,
+        });
+
+        socket.data.heygenSessionId = sessionData.session_id;
+
+        // Send session info to client for WebRTC setup
+        socket.emit('avatar-session-created', {
+          sessionId: sessionData.session_id,
+          accessToken: sessionData.access_token,
+        });
+
+        // Start the session
+        await heygenService.startSession(sessionData.session_id);
+        
+        const session = heygenSessions.get(socket.id);
+        session.isActive = true;
+        socket.data.isAvatarActive = true;
+
+        socket.emit('avatar-started', {
+          message: 'Avatar session started successfully',
+        });
+
+        logger.info(`HeyGen avatar started for ${socket.id}`);
+      } catch (error) {
+        logger.error('Error starting HeyGen avatar:', error);
+        socket.emit('avatar-error', {
+          error: error.message,
+        });
+      }
+    });
+
+    /**
+     * Stop HeyGen avatar session
+     */
+    socket.on('stop-avatar', async () => {
+      try {
+        const session = heygenSessions.get(socket.id);
+        
+        if (session && session.sessionId) {
+          logger.info(`Stopping HeyGen avatar for ${socket.id}`);
+          
+          await heygenService.stopSession(session.sessionId);
+          heygenSessions.delete(socket.id);
+          socket.data.heygenSessionId = null;
+          socket.data.isAvatarActive = false;
+
+          socket.emit('avatar-stopped', {
+            message: 'Avatar session stopped successfully',
+          });
+
+          logger.info(`HeyGen avatar stopped for ${socket.id}`);
+        }
+      } catch (error) {
+        logger.error('Error stopping HeyGen avatar:', error);
+        socket.emit('avatar-error', {
+          error: error.message,
+        });
+      }
+    });
+
+    /**
+     * Handle ICE candidates for WebRTC
+     */
+    socket.on('ice-candidate', async (data) => {
+      try {
+        const { candidate } = data;
+        const session = heygenSessions.get(socket.id);
+
+        if (session && session.sessionId) {
+          await heygenService.sendICE(session.sessionId, candidate);
+        }
+      } catch (error) {
+        logger.error('Error sending ICE candidate:', error);
+      }
+    });
+
+    // ============================================
+    // EXISTING CONVERSATION FUNCTIONALITY
+    // ============================================
 
     /**
      * Set conversation mode (voice or text)
@@ -45,7 +150,8 @@ export const initializeSocket = (httpServer) => {
 
     /**
      * Handle text message from user
-     * Used in TEXT MODE
+     * Used in TEXT MODE and VOICE MODE
+     * Now integrated with HeyGen for avatar TTS
      */
     socket.on('send-message', async ({ message, userId }) => {
       try {
@@ -55,10 +161,12 @@ export const initializeSocket = (httpServer) => {
         }
 
         const mode = socket.data.conversationMode;
+        const heygenSession = heygenSessions.get(socket.id);
+        const useHeyGen = heygenSession && heygenSession.isActive;
         
         logger.info(`Processing ${mode} message from ${socket.id}: ${message.substring(0, 50)}...`);
 
-        // Show typing indicator
+        // Show thinking indicator
         socket.emit('avatar-status', { 
           status: 'thinking',
           mode 
@@ -93,29 +201,65 @@ export const initializeSocket = (httpServer) => {
             timestamp: new Date().toISOString()
           });
 
-          socket.emit('avatar-status', { status: 'idle', mode: 'text' });
+          // If HeyGen is active, also make avatar speak
+          if (useHeyGen) {
+            socket.emit('avatar-status', { status: 'speaking', mode: 'text' });
+            
+            try {
+              await heygenService.speakText(heygenSession.sessionId, aiResponse);
+              
+              // Estimate speaking duration
+              const speakingDuration = aiResponse.length * 50;
+              setTimeout(() => {
+                socket.emit('avatar-status', { status: 'idle', mode: 'text' });
+              }, speakingDuration);
+            } catch (error) {
+              logger.error('HeyGen TTS error in text mode:', error);
+              socket.emit('avatar-status', { status: 'idle', mode: 'text' });
+            }
+          } else {
+            socket.emit('avatar-status', { status: 'idle', mode: 'text' });
+          }
 
         } else if (mode === 'voice') {
-          // VOICE MODE: Generate voice and send audio only
-          // DO NOT send text to client in voice mode
+          // VOICE MODE: Generate voice response
           socket.emit('avatar-status', { 
             status: 'speaking',
             mode: 'voice'
           });
 
           try {
-            // Generate voice using ElevenLabs
-            const audioBuffer = await generateVoice(aiResponse);
+            if (useHeyGen) {
+              // Use HeyGen for avatar TTS
+              await heygenService.speakText(heygenSession.sessionId, aiResponse);
+              
+              socket.emit('ai-voice-response', {
+                mode: 'voice',
+                timestamp: new Date().toISOString(),
+                source: 'heygen'
+              });
 
-            // Send audio data to client
-            socket.emit('ai-voice-response', {
-              audio: audioBuffer.toString('base64'),
-              mode: 'voice',
-              timestamp: new Date().toISOString()
-              // Note: NO text field here - client should not see text in voice mode
-            });
+              // Estimate speaking duration
+              const speakingDuration = aiResponse.length * 50;
+              setTimeout(() => {
+                socket.emit('avatar-status', { status: 'idle', mode: 'voice' });
+              }, speakingDuration);
 
-            // Optional: Send hidden transcript for debugging (only if debug mode is enabled)
+            } else {
+              // Fallback to ElevenLabs if HeyGen not active
+              const audioBuffer = await generateVoice(aiResponse);
+
+              socket.emit('ai-voice-response', {
+                audio: audioBuffer.toString('base64'),
+                mode: 'voice',
+                timestamp: new Date().toISOString(),
+                source: 'elevenlabs'
+              });
+
+              socket.emit('avatar-status', { status: 'idle', mode: 'voice' });
+            }
+
+            // Debug transcript (only in debug mode)
             if (process.env.DEBUG_MODE === 'true') {
               socket.emit('debug-transcript', {
                 text: aiResponse,
@@ -129,9 +273,8 @@ export const initializeSocket = (httpServer) => {
               message: 'Failed to generate voice response',
               mode: 'voice'
             });
+            socket.emit('avatar-status', { status: 'idle', mode: 'voice' });
           }
-
-          socket.emit('avatar-status', { status: 'idle', mode: 'voice' });
         }
 
       } catch (error) {
@@ -194,8 +337,20 @@ export const initializeSocket = (httpServer) => {
     /**
      * Disconnect event
      */
-    socket.on('disconnect', (reason) => {
+    socket.on('disconnect', async (reason) => {
       logger.info(`Client disconnected: ${socket.id}, reason: ${reason}`);
+      
+      // Cleanup HeyGen session on disconnect
+      const session = heygenSessions.get(socket.id);
+      if (session && session.sessionId) {
+        try {
+          await heygenService.stopSession(session.sessionId);
+          logger.info(`Cleaned up HeyGen session for ${socket.id}`);
+        } catch (error) {
+          logger.error('Error cleaning up HeyGen session:', error);
+        }
+      }
+      heygenSessions.delete(socket.id);
     });
 
     /**
@@ -211,7 +366,7 @@ export const initializeSocket = (httpServer) => {
     logger.error('Socket.IO server error:', error);
   });
 
-  logger.info('Socket.IO initialized successfully');
+  logger.info('Socket.IO initialized successfully with HeyGen integration');
   
   return io;
 };
