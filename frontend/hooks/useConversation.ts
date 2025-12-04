@@ -1,182 +1,269 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { getSocket } from '@/lib/socket';
+'use client';
 
-export type ConversationMode = 'text' | 'voice';
+import { error } from 'console';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { io, Socket } from 'socket.io-client';
+
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:5001';
+
 export type AvatarStatus = 'idle' | 'thinking' | 'speaking';
+export type ConversationMode = 'text' | 'speech';
 
 export interface Message {
+  id: string;
   role: 'user' | 'assistant';
   content: string;
-  timestamp: string;
-  type: 'text' | 'voice';
-  audio?: Blob;
+  timestamp: Date;
 }
 
-export const useConversation = () => {
-  const [mode, setMode] = useState<ConversationMode>('text');
+export function useConversation() {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [avatarStatus, setAvatarStatus] = useState<AvatarStatus>('idle');
-  const [isConnected, setIsConnected] = useState(false);
   const [isAvatarActive, setIsAvatarActive] = useState(false);
+  const [conversationMode, setConversationMode] = useState<ConversationMode>('text');
+  const [currentAudioElement, setCurrentAudioElement] = useState<HTMLAudioElement | null>(null);
   
-  const socketRef = useRef<ReturnType<typeof getSocket> | null>(null);
+  // Audio ref for playing voice responses
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Initialize audio element
   useEffect(() => {
-    // Initialize socket connection
-    socketRef.current = getSocket();
-    const socket = socketRef.current;
+    if (typeof window !== 'undefined') {
+      console.log('🎵 Initializing audio element...');
+      const audio = new Audio();
+      
+      audioRef.current = audio;
+      setCurrentAudioElement(audio);
+      console.log('✅ Audio element initialized');
+    }
+    
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+      }
+    };
+  }, []);
 
-    // Connection events
-    socket.on('connect', () => {
-      console.log('Connected to backend');
+  // Initialize socket connection
+  useEffect(() => {
+    const socketInstance = io(SOCKET_URL, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+    });
+
+    socketInstance.on('connect', () => {
+      console.log('✅ Connected to server');
       setIsConnected(true);
     });
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from backend');
+    socketInstance.on('disconnect', () => {
+      console.log('❌ Disconnected from server');
       setIsConnected(false);
     });
 
-    // Mode change confirmation
-    socket.on('mode-changed', ({ mode: newMode }: { mode: ConversationMode }) => {
-      console.log('Mode changed to:', newMode);
-      setMode(newMode);
+    // Avatar events
+    socketInstance.on('avatar-started', () => {
+      console.log('✅ Avatar started');
+      setIsAvatarActive(true);
+      setAvatarStatus('idle');
     });
 
-    // Avatar status updates
-    socket.on('avatar-status', ({ status }: { status: AvatarStatus }) => {
+    socketInstance.on('avatar-stopped', () => {
+      console.log('🛑 Avatar stopped');
+      setIsAvatarActive(false);
+      setAvatarStatus('idle');
+    });
+
+    socketInstance.on('avatar-status', ({ status, mode }) => {
+      console.log(`📊 Avatar status: ${status} (${mode})`);
       setAvatarStatus(status);
     });
 
-    // TEXT MODE: Receive text response
-    socket.on('ai-response', ({ message, timestamp }: { message: string; timestamp: string }) => {
-      setMessages(prev => [...prev, {
+    socketInstance.on('avatar-error', ({ error }) => {
+      console.error('❌ Avatar error:', error);
+      setAvatarStatus('idle');
+    });
+
+    // Mode change event
+    socketInstance.on('mode-changed', ({ mode }) => {
+      console.log(`🔄 Mode changed to: ${mode}`);
+      setConversationMode(mode);
+    });
+
+    // Text response (for text mode)
+    socketInstance.on('ai-response', ({ message, timestamp }) => {
+      console.log('📝 Received text response:', message);
+      
+      const newMessage: Message = {
+        id: Date.now().toString(),
         role: 'assistant',
         content: message,
-        timestamp,
-        type: 'text'
-      }]);
-    });
-
-    // VOICE MODE: Receive audio response
-    socket.on('ai-voice-response', ({ audio, timestamp }: { audio: string; timestamp: string }) => {
-      // Convert base64 to blob and play
-      const audioBlob = base64ToBlob(audio, 'audio/mpeg');
-      playAudio(audioBlob);
+        timestamp: new Date(timestamp),
+      };
       
-      // Add placeholder message (no text in voice mode!)
-      setMessages(prev => [...prev, {
+      setMessages((prev) => [...prev, newMessage]);
+      setAvatarStatus('idle');
+    });
+
+    // Voice response (for speech mode)
+    socketInstance.on('ai-voice-response', ({ audio, message, timestamp }) => {
+      console.log('🎙️ Received voice response');
+      console.log('📊 Audio data length:', audio?.length || 0);
+      console.log('💬 Message:', message);
+      
+      const newMessage: Message = {
+        id: Date.now().toString(),
         role: 'assistant',
-        content: '[Voice Response]',
-        timestamp,
-        type: 'voice',
-        audio: audioBlob
-      }]);
+        content: message,
+        timestamp: new Date(timestamp),
+      };
+      
+      setMessages((prev) => [...prev, newMessage]);
+      
+      // Play audio
+      if (audio && audioRef.current) {
+        try {
+          console.log('🔄 Converting base64 to audio...');
+          
+          // Convert base64 to blob URL
+          const binaryString = atob(audio);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'audio/mpeg' });
+          const audioUrl = URL.createObjectURL(blob);
+          
+          console.log('🔊 Setting audio source...');
+          audioRef.current.src = audioUrl;
+          audioRef.current.volume = 1.0;
+          
+          // CRITICAL: Update state IMMEDIATELY so AvatarDisplay can connect
+          setCurrentAudioElement(audioRef.current);
+          console.log('📻 Audio element state updated - lip-sync can now connect');
+          
+          // Set up event handlers BEFORE playing
+          audioRef.current.onloadeddata = () => {
+            console.log('📥 Audio data loaded, ready to play');
+          };
+          
+          audioRef.current.onplay = () => {
+            console.log('▶️ Audio started playing - LIP-SYNC SHOULD START NOW');
+            setAvatarStatus('speaking');
+          };
+          
+          audioRef.current.onended = () => {
+            console.log('⏹️ Audio playback finished');
+            URL.revokeObjectURL(audioUrl);
+            setAvatarStatus('idle');
+          };
+          
+          audioRef.current.onerror = (e) => {
+            console.error('❌ Audio playback error during voice response:', e);
+            URL.revokeObjectURL(audioUrl);
+            setAvatarStatus('idle');
+          };
+          
+          // Play audio
+          console.log('🎬 Starting playback...');
+          //const playPromise = audioRef.current.play();
+          
+          if (audioRef.current && (window as any).audioContextForLipSync) {
+            const ctx = (window as any).audioContextForLipSync;
+            if(ctx.state === 'suspended') {
+              console.log('Resuming suspended AudioContext...');
+              ctx.resume();
+            }
+          }
+
+          const playPromise = audioRef.current.play();
+
+          if(playPromise !== undefined) {
+            playPromise.then(() => {
+              console.log('Audio playing successfully - lip-sync active');
+            })
+            .catch((error) => {
+              console.error('Audio play failed:', error);
+              setAvatarStatus('idle');
+            });
+          }
+        } catch(error) {
+          console.error('Error processing voice response:', error);
+          setAvatarStatus('idle');
+        }
+      }
     });
 
-    // Error handling
-    socket.on('error', ({ message: errorMsg }: { message: string }) => {
-      console.error('Socket error:', errorMsg);
-      alert(errorMsg);
+    // Error event
+    socketInstance.on('error', ({ message: errorMessage }) => {
+      console.error('❌ Socket error:', errorMessage);
+      setAvatarStatus('idle');
     });
 
-    // Cleanup
+    setSocket(socketInstance);
+
     return () => {
-      socket.off('connect');
-      socket.off('disconnect');
-      socket.off('mode-changed');
-      socket.off('avatar-status');
-      socket.off('ai-response');
-      socket.off('ai-voice-response');
-      socket.off('error');
+      socketInstance.disconnect();
     };
-  }, []);
-
-  // Switch between voice and text mode
-  const switchMode = useCallback((newMode: ConversationMode) => {
-    if (socketRef.current) {
-      socketRef.current.emit('set-mode', { mode: newMode });
-    }
   }, []);
 
   // Send message
-  const sendMessage = useCallback((message: string, userId = 'user123') => {
-    if (!socketRef.current || !message.trim()) return;
+  const sendMessage = useCallback((message: string) => {
+    if (!socket || !message.trim()) return;
 
-    // Add user message to UI
-    setMessages(prev => [...prev, {
+    console.log('📤 Sending message:', message);
+
+    const userMessage: Message = {
+      id: Date.now().toString(),
       role: 'user',
       content: message,
-      timestamp: new Date().toISOString(),
-      type: 'text'
-    }]);
+      timestamp: new Date(),
+    };
 
-    // Send to backend
-    socketRef.current.emit('send-message', { message, userId });
-  }, []);
+    setMessages((prev) => [...prev, userMessage]);
 
-  // Clear conversation
-  const clearConversation = useCallback(() => {
-    if (socketRef.current) {
-      socketRef.current.emit('clear-conversation');
-      setMessages([]);
-    }
-  }, []);
+    socket.emit('send-message', {
+      message,
+      userId: 'user123',
+    });
+  }, [socket]);
 
   // Start avatar
   const startAvatar = useCallback(() => {
-    setIsAvatarActive(true);
-    // You can emit a socket event here if needed
-  }, []);
+    if (!socket) return;
+    console.log('🎬 Starting avatar...');
+    socket.emit('start-avatar');
+  }, [socket]);
 
   // Stop avatar
   const stopAvatar = useCallback(() => {
-    setIsAvatarActive(false);
-    // Stop any playing audio
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-  }, []);
+    if (!socket) return;
+    console.log('🛑 Stopping avatar...');
+    socket.emit('stop-avatar');
+  }, [socket]);
 
-  // Helper: Convert base64 to blob
-  const base64ToBlob = (base64: string, mimeType: string): Blob => {
-    const byteCharacters = atob(base64);
-    const byteNumbers = new Array(byteCharacters.length);
-    for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers);
-    return new Blob([byteArray], { type: mimeType });
-  };
-
-  // Helper: Play audio
-  const playAudio = (audioBlob: Blob) => {
-    const audioUrl = URL.createObjectURL(audioBlob);
-    const audio = new Audio(audioUrl);
-    audioRef.current = audio;
-    
-    audio.play().catch(err => {
-      console.error('Failed to play audio:', err);
-    });
-
-    audio.onended = () => {
-      URL.revokeObjectURL(audioUrl);
-      audioRef.current = null;
-    };
-  };
+  // Change conversation mode
+  const changeMode = useCallback((mode: ConversationMode) => {
+    if (!socket) return;
+    console.log('🔄 Changing mode to:', mode);
+    socket.emit('set-mode', { mode });
+  }, [socket]);
 
   return {
-    mode,
     messages,
     avatarStatus,
     isConnected,
     isAvatarActive,
-    switchMode,
+    conversationMode,
+    audioElement: currentAudioElement,
     sendMessage,
-    clearConversation,
     startAvatar,
     stopAvatar,
+    changeMode,
   };
-};
+}
